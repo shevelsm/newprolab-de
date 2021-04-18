@@ -1,8 +1,7 @@
 import re
-import os
 
 from urllib.parse import urlparse
-from urllib.request import urlretrieve, unquote
+from urllib.request import unquote
 
 from pyspark.sql import SparkSession
 
@@ -21,11 +20,11 @@ topic_in = name + "_lab04_in"
 topic_out = name + "_lab04_out"
 kafka_bootstrap = "95.163.181.28:6667"
 
-destination_path = "/user/ubuntu/lab04/prediction"
-checkpointPath = "/tmp/lab04_checkpoint"
+destination_path = "/user/ubuntu/lab04/prediction_4s"
+checkpointPath = "/tmp/lab04s_checkpoint"
 
 # Spark init
-spark = SparkSession.builder.appName("lab04_test").getOrCreate()
+spark = SparkSession.builder.appName("lab04s_test").getOrCreate()
 spark.sparkContext.setLogLevel('WARN')
 
 # Test dataset JSON schema
