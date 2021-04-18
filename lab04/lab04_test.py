@@ -80,7 +80,7 @@ model = PipelineModel.load(model_path)
 st = spark \
     .readStream \
     .format("kafka") \
-    .option("checkpointLocation", "file:///tmp/checkpoint") \
+    .option("checkpointLocation", checkpointPath) \
     .option("kafka.bootstrap.servers", kafka_bootstrap) \
     .option("subscribe", topic_in) \
     .option("startingOffsets", "latest") \
