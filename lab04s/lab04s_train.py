@@ -96,12 +96,3 @@ cv_model = crossval.fit(train2url)
 # Save the model
 best_model = cv_model.bestModel
 best_model.write().overwrite().save(model_path)
-
-# Hyperparameters
-lr_model = best_model.stages[2]
-
-logging.info(
-    lr_model.getOrDefault(lr_model.getParam("regParam")),
-    lr_model.getOrDefault(lr_model.getParam("maxIter")),
-    lr_model.getOrDefault(lr_model.getParam("elasticNetParam"))
-)
