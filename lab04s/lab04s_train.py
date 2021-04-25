@@ -1,12 +1,11 @@
-import logging
-import re
-from urllib.parse import urlparse
-from urllib.request import urlretrieve, unquote
+#
+# Lab04s - implementation with GridParam search with Cross Validation
+#
+
 from pyspark.sql import SparkSession
 
 import pyspark.sql.functions as F
 from pyspark.sql.types import *
-from pyspark.sql.functions import udf
 
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import LogisticRegression
@@ -16,83 +15,71 @@ from pyspark.ml.feature import StringIndexer, IndexToString
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 
+#
+# Get app name and app options
+#
+import sys
+if len(sys.argv)==0:
+    print("Give an argument - an appName for Spark")
+    sys.exit(1)
 
-# AFS
-train_path = "/user/ubuntu/lab04/lab04_train_merged_labels.json"
-model_path = "/user/ubuntu/lab04/lab04s_model.ml"
+appName = sys.argv[1]
+print("APP", appName)
 
-spark = SparkSession.builder.appName("lab04s").getOrCreate()
+#
+# Spark context init
+#
+spark = SparkSession.builder.appName(appName).getOrCreate()
 spark.sparkContext.setLogLevel('WARN')
 
-# Train dataset JSON schema
-schema = StructType(
-   fields = [
-      StructField("uid", StringType(), True),
-      StructField("gender_age", StringType(), True),
-      StructField("visits",  ArrayType(
-          StructType(
-           fields = [
-            StructField("timestamp", LongType(), True),
-            StructField("url", StringType(), True),
+#
+# App config (from submit command line or from zookeeper)
+#
+train_path = spark.conf.get("spark."+appName+".train_path")
+model_path = spark.conf.get("spark."+appName+".model_path")
+print("TRAIN_PATH", train_path)
+print("MODEL_PATH", model_path)
 
-      ])), True),
-])
 
-train = spark.read.json(train_path, schema = schema)
+# 
+# Read the model and model's parameters
+#
+# this needs to be done after Spark context initialized.
+
+import lab04s_model
+
+from lab04s_model import Url2DomainTransformer, pipeline_crossval
+from lab04s_model import input_cols, label_cols, output_cols, train_schema
+
+#
+# Read the data
+#
+train = spark.read.json(train_path, schema = train_schema)
 
 train.show(5)
 
-train2 = train.select("uid", F.col("visits").url.alias("urls"), "gender_age")
-train2.show(5)
-
-def url2domain(url):
-    url = re.sub('(http(s)*://)+', 'http://', url)
-    parsed_url = urlparse(unquote(url.strip()))
-    if parsed_url.scheme not in ['http','https']: return None
-    netloc = re.search("(?:www\.)?(.*)", parsed_url.netloc).group(1)
-    if netloc is not None: return str(netloc.encode('utf8')).strip()
-    return None
-
-def transform(f, t=StringType()):
-    if not isinstance(t, DataType):
-       raise TypeError("Invalid type {}".format(type(t)))
-    @udf(ArrayType(t))
-    def _(xs):
-        if xs is not None:
-            return [f(x) for x in xs]
-    return _
-
-foo_udf = transform(url2domain)
-
-train2url = train2.withColumn('domains', foo_udf(F.col('urls')))
-train2url.show(5, truncate=True)
-
-# Model Definition
-cv = CountVectorizer(inputCol="domains", outputCol="features")
-
-lr = LogisticRegression()
-
-indexer = StringIndexer(inputCol="gender_age", outputCol="label")
-
-pipeline = Pipeline(stages=[cv, indexer, lr])
-
-# Hyperparameter tuning
-paramGrid = ParamGridBuilder() \
-    .addGrid(lr.elasticNetParam, [0.1, 0.5, 0.9]) \
-    .addGrid(lr.maxIter, [5, 10]) \
-    .addGrid(lr.regParam, [0.001, 0.01]) \
-    .build()
-
-evaluator = MulticlassClassificationEvaluator(metricName='accuracy')
-
-crossval = CrossValidator(estimator=pipeline,
-                          estimatorParamMaps=paramGrid,
-                          evaluator=evaluator,
-                          numFolds=3)
-
+#
 # Train the model
-cv_model = crossval.fit(train2url)
+#
+cv_model = pipeline_crossval.fit(train)
 
+
+#
 # Save the model
+#
 best_model = cv_model.bestModel
 best_model.write().overwrite().save(model_path)
+
+#
+# Hyperparameters
+#
+lr_model = best_model.stages[-2]
+
+print(
+    lr_model.getOrDefault(lr_model.getParam("regParam")),
+    lr_model.getOrDefault(lr_model.getParam("maxIter")),
+    lr_model.getOrDefault(lr_model.getParam("elasticNetParam"))
+)
+
+# This model should give 0.2534 on test.
+

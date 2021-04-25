@@ -1,101 +1,110 @@
-import re
 
-from urllib.parse import urlparse
-from urllib.request import unquote
-
+from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
+from pyspark.streaming import StreamingContext
+
 
 import pyspark.sql.functions as F
 from pyspark.sql.types import *
-from pyspark.sql.functions import udf
+
+
 from pyspark.ml import Pipeline, PipelineModel
-from pyspark.ml.feature import IndexToString
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.feature import CountVectorizer
 
+from pyspark.ml.feature import  IndexToString #,StringIndexer
+from pyspark.sql.functions import from_json
 
-# AFS
-model_path = "/user/ubuntu/lab04/lab04s_model.ml"
+#
+# Get app name as this script argument
+#
+import sys
+if len(sys.argv)==0:
+    print("Give an argument - an appName for Spark")
+    sys.exit(1)
 
-name = "alexey_shevelev"
-topic_in = name + "_lab04_in"
-topic_out = name + "_lab04_out"
-kafka_bootstrap = "95.163.181.28:6667"
+appName = sys.argv[1]
+print("APP", appName)
 
-destination_path = "/user/ubuntu/lab04/prediction_4s"
-checkpointPath = "/tmp/lab04s_checkpoint"
-
+#
 # Spark init
-spark = SparkSession.builder.appName("lab04s_test").getOrCreate()
+#
+spark = SparkSession.builder.appName(appName).getOrCreate()
 spark.sparkContext.setLogLevel('WARN')
 
-# Test dataset JSON schema
-schema = StructType(
-    fields=[
-        StructField("uid", StringType(), True),
-        StructField("visits", ArrayType(
-            StructType(
-                fields=[
-                    StructField("timestamp", LongType(), True),
-                    StructField("url", StringType(), True),
+#
+# Import the model
+#
+# needs to be done after context init
 
-                ])), True),
-    ])
-
-# Extract domains from URLs
-def url2domain(url):
-    url = re.sub('(http(s)*://)+', 'http://', url)
-    parsed_url = urlparse(unquote(url.strip()))
-    if parsed_url.scheme not in ['http', 'https']: return None
-    netloc = re.search("(?:www\.)?(.*)", parsed_url.netloc).group(1)
-    if netloc is not None: return str(netloc.encode('utf8')).strip()
-    return None
+from lab04s_model import Url2DomainTransformer
+from lab04s_model import test_schema, input_cols, output_cols
 
 
-def transform(f, t=StringType()):
-    if not isinstance(t, DataType):
-        raise TypeError("Invalid type {}".format(type(t)))
+#
+# App config (from submit arguments or zookeeper)
+#
 
-    @udf(ArrayType(t))
-    def _(xs):
-        if xs is not None:
-            return [f(x) for x in xs]
+model_path = spark.conf.get("spark."+appName+".model_path")
+test_path = spark.conf.get("spark."+appName+".test_path") 
+pred_path = spark.conf.get("spark."+appName+".pred_path") 
+checkpoint_path = spark.conf.get("spark."+appName+".checkpoint_path") #"/tmp/chkp"
 
-    return _
-
-
-foo_udf = transform(url2domain)
-
-# Model load
+#
+# Load the model
+#
 model = PipelineModel.load(model_path)
 
-# Read the srtream
+print(model.stages)
+
+name_surname = "name_surname"
+topic_in = name_surname + "_lab04_in"
+topic_out = name_surname + "_lab04_out"
+# ! use your own IP
+kafka_bootstrap = "85.192.32.243:6667"
+
+#
+# Read the stream (files from a dir)
+#
 st = spark \
-    .readStream \
-    .format("kafka") \
-    .option("checkpointLocation", checkpointPath) \
-    .option("kafka.bootstrap.servers", kafka_bootstrap) \
-    .option("subscribe", topic_in) \
-    .option("startingOffsets", "latest") \
-    .load() \
-    .selectExpr("CAST(value as string)") \
-    .select(F.from_json("value", schema).alias("value")) \
-    .select(F.col("value.*")) \
-    .select("uid", F.col('visits').url.alias("urls")) \
-    .withColumn('domains', foo_udf(F.col('urls')))
+  .readStream \
+  .format("kafka") \
+  .option("kafka.bootstrap.servers", kafka_bootstrap ) \
+  .option("subscribe", topic_in) \
+  .option("startingOffsets", "latest") \
+  .load()\
+  .selectExpr("CAST(value as string)")\
+  .select(from_json("value", test_schema).alias("value"))\
+  .select(F.col("value.uid").alias("uid")\
+  ,F.col("value.visits").alias("visits")\
+  ,F.lit("").alias("gender_age")
+  )\
 
-# Infer on test data
+#
+# Apply the model
+#
 results = model.transform(st)
-converter = IndexToString(inputCol="prediction", outputCol="gender_age", labels=model.stages[1].labels)
-converted = converter.transform(results)
 
-# Saving to out topic
-query = converted \
-    .select(F.to_json(F.struct("uid", "gender_age")).alias("value")) \
-    .writeStream \
-    .outputMode("append") \
-    .format("kafka") \
-    .option("checkpointLocation", checkpointPath) \
-    .option("kafka.bootstrap.servers", kafka_bootstrap) \
-    .option("topic", topic_out) \
-    .start()
+# Write to Kafka 
+#
+query = results\
+ .select(F.col("uid"),F.col("gender_age_pred").alias("gender_age"))\
+ .select(F.to_json(F.struct(*output_cols)).alias("value"))\
+ .writeStream \
+ .outputMode("update")\
+ .format("kafka") \
+ .option("checkpointLocation", "/tmp/checkpoint-write")\
+ .option("kafka.bootstrap.servers", kafka_bootstrap ) \
+ .option("topic", topic_out) \
+ .start()\
+
+# (optionally)
+# Write stream results to dir as csv 
+#
+#query = results\
+# .select(F.to_json(F.struct(*output_cols)).alias("value"))\
+# .writeStream.format("text").outputMode("append")\
+# .option("path", pred_path).option("checkpointLocation", checkpoint_path)\
+# .start()
 
 query.awaitTermination()
